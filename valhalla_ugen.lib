@@ -1,0 +1,43 @@
+//################################ valhalla_ugen.lib #######################################
+// Shared SuperCollider wrapper for the six valhallaSupermassive modes (sm_*.dsp).
+// A model of Valhalla DSP's free ValhallaSupermassive; not affiliated with or endorsed by
+// Valhalla DSP. The model is re.valhallaSupermassive by David Braun (MIT), adapted in
+// valhalla_sm_270.lib.
+//
+// Each mode is its own UGen because `mode` must be a compile-time constant: the modes are
+// different networks, and one UGen with a mode switch would run all six at once.
+//
+// Inputs: L, R. Outputs: L, R (dry + wet, mixed by `mix`).
+//
+// Memory (scsynth real-time pool, per instance, with fsmax = 48000):
+//   Gemini, Centaurus, Sagittarius, Great Annihilator (16 delay lines): 8 MB
+//   Lyra, Virgo (4 delay lines): 2 MB
+// scsynth's default pool is 8 MB, so raise it, e.g. s.options.memSize = 2**18 (256 MB).
+//##########################################################################################
+import("stdfaust.lib");
+vs = library("valhalla_sm_270.lib");
+
+// Highest sample rate the delay lines are sized for. Above it the longest delays are
+// shortened (at 96 kHz with 48000: about 1 s instead of 2 s). Doubling it doubles the memory.
+fsmax = 48000;
+
+// Every control has an explicit [n] index so the UGen argument order is fixed.
+// Smoothed here: the plain gains and angles (mix, feedback, density, width, moddepth).
+// delay and warp are smoothed inside the model, on each line's length, so changes glide
+// like a tape delay instead of clicking. lowcut, highcut and modrate change once per block.
+smooth0(x) = f ~ _
+with { c = 1 - 44.1/ma.SR; f(y) = ba.if(ba.time == 0, x, y + (1 - c)*(x - y)); };
+
+mix      = hslider("[00]mix",      0.5,   0,    1,     0.01) : smooth0;  // 0 dry .. 1 wet, equal-power
+delay    = hslider("[01]delay",    200,   0,    2000,  0.01);            // ms
+warp     = hslider("[02]warp",     0.3,   0,    1,     0.01);            // spreads the delay lengths
+feedback = hslider("[03]feedback", 0.6,   0,    1,     0.01) : smooth0;
+density  = hslider("[04]density",  0.3,   0,    1,     0.01) : smooth0;  // scattering angle
+width    = hslider("[05]width",    1,     -1,   1,     0.01) : smooth0;  // 1 full, 0 mono, -1 swapped
+lowcut   = hslider("[06]lowcut",   10,    10,   2000,  0.01);            // Hz
+highcut  = hslider("[07]highcut",  20000, 200,  20000, 0.01);            // Hz
+modrate  = hslider("[08]modrate",  0.5,   0.01, 10,    0.001);           // Hz
+moddepth = hslider("[09]moddepth", 0.2,   0,    1,     0.01) : smooth0;
+
+ugen(mode) = vs.valhallaSupermassive(fsmax, mode, mix, delay, warp, feedback, density,
+                                     width, lowcut, highcut, modrate, moddepth);

@@ -1,0 +1,104 @@
+//#################################### autogain.lib ########################################
+// Adaptive autogain (makeup gain) for dynamics processors.
+//
+// Include it in your code with:
+//
+//     au = library("autogain.lib");
+//
+// The functions take their settings as arguments and have no UI of their own,
+// so the host program decides where the controls live.
+//
+// Note: the makeup follows the gain reduction with a lag of about `tau`. Short
+// times (below ~0.5 s) make the makeup cancel the compression and cause pumping.
+//##########################################################################################
+declare name "Adaptive autogain";
+declare version "1.1";
+
+import("stdfaust.lib");
+
+//------------------------------`(au.)gatedAvg`--------------------------------------------
+// Average that holds its value while `open` is 0 (gate closed).
+// It starts as a running mean of every open sample so far, so it is correct
+// from the first sample, then becomes a one-pole average with time constant
+// `tau` once enough samples have been seen.
+//
+// #### Usage
+//
+// ```
+// x : gatedAvg(open, tau) : _
+// ```
+//
+// Where:
+//
+// * `open`: 1 = keep averaging, 0 = hold the current value
+// * `tau`: time constant in seconds
+//------------------------------------------------------------------------------------------
+gatedAvg(open, tau, x) = loop ~ _
+with {
+  n = (+(open) : min(1e7)) ~ _;                    // open samples so far (capped)
+  c = min(ba.tau2pole(tau), (n - 1) / max(n, 1));  // running mean first, then one-pole
+  loop(y) = ba.if(open, c*y + (1 - c)*x, y);
+};
+
+//------------------------------`(au.)gate`------------------------------------------------
+// Gate with hysteresis on a power signal: opens above `gateDb`, closes
+// `hystDb` below it.
+//
+// #### Usage
+//
+// ```
+// p : gate(gateDb, hystDb) : _
+// ```
+//------------------------------------------------------------------------------------------
+gate(gateDb, hystDb, p) = decide ~ _
+with {
+  hi = ba.db2linear(gateDb)^2;
+  lo = ba.db2linear(gateDb - hystDb)^2;
+  decide(prev) = ba.if(prev, p > lo, p > hi);
+};
+
+//------------------------------`(au.)makeupDb`--------------------------------------------
+// Makeup gain in dB, before smoothing and on/off switching.
+//
+// #### Usage
+//
+// ```
+// pIn, pOut, gr : makeupDb(mode, tau, gateDb, maxDb) : _
+// ```
+//
+// Where:
+//
+// * `mode`: 0 = Average GR (average of `gr`), 1 = Level match (input power / output power)
+// * `tau`: averaging time in seconds
+// * `gateDb`: input level (dBFS) below which the averages hold their value
+//   (with 3 dB hysteresis)
+// * `maxDb`: upper limit for the makeup gain in dB
+// * `pIn`: input power (e.g. mean of L² and R²)
+// * `pOut`: output power before makeup
+// * `gr`: gain reduction in dB (>= 0)
+//------------------------------------------------------------------------------------------
+makeupDb(mode, tau, gateDb, maxDb, pIn, pOut, gr) =
+    select2(mode, makeupA, makeupB) : max(0) : min(maxDb)
+with {
+  open    = pIn : si.smooth(ba.tau2pole(0.005)) : gate(gateDb, 3);
+  makeupA = gatedAvg(open, tau, gr);                                   // Average GR
+  makeupB = 10 * log10((gatedAvg(open, tau, pIn) + 1e-20)
+                     / (gatedAvg(open, tau, pOut) + 1e-20));           // Level match
+};
+
+//------------------------------`(au.)makeup`----------------------------------------------
+// Smoothed linear makeup gain. Apply one gain to every channel to keep the image intact.
+//
+// #### Usage
+//
+// ```
+// pIn, pOut, gr : makeup(on, mode, tau, gateDb, maxDb) : _
+// ```
+//
+// Where:
+//
+// * `on`: 1 = autogain on, 0 = off (gain of 1)
+// * the other arguments are the same as in `makeupDb`
+//------------------------------------------------------------------------------------------
+makeup(on, mode, tau, gateDb, maxDb, pIn, pOut, gr) =
+    makeupDb(mode, tau, gateDb, maxDb, pIn, pOut, gr) : *(on) : si.smoo : ba.db2linear;

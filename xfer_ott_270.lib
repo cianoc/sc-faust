@@ -1,0 +1,135 @@
+//################################# xfer_ott_270.lib ######################################
+// co.xfer_ott from faustlibraries (added 2026-09-24, revised 2026-10-07), by David Braun,
+// MIT license, with one change so that it compiles with Faust 2.70:
+// the envelope follower's attack/release choice uses arithmetic instead of ba.if.
+// Faust 2.70.3 generates C++ with undeclared constants (fConst...) for the original;
+// Faust 2.90 compiles the original. The output is identical (tested).
+//
+// Usage (same arguments as co.xfer_ott):
+//     ot = library("xfer_ott_270.lib");
+//     process = ot.xfer_ott(depth, time, ingain, outgain, upward, downward,
+//                           threshL, threshM, threshH, gainL, gainM, gainH,
+//                           bypUpL, bypUpM, bypUpH, bypDnL, bypDnM, bypDnH);
+//##########################################################################################
+declare xfer_ott author "David Braun";
+declare xfer_ott license "MIT";
+
+import("stdfaust.lib");
+xfer_ott(depth, time, ingain, outgain, upward, downward,
+         threshL, threshM, threshH, gainL, gainM, gainH,
+         bypUpL, bypUpM, bypUpH, bypDnL, bypDnM, bypDnH, xL, xR) = outL, outR
+with {
+    ia = ba.db2linear(ingain);
+    oa = ba.db2linear(outgain);
+    tp = 100.0 * max(0.0, time);            // release scale in percent
+
+    // Softplus hinge: asymptotes 0 / slope 1.
+    soft(w, z) = max(z, 0.0) + w * log(1.0 + exp(0.0 - abs(z) / w));
+
+    // Switching one-pole on the squared signal (per-sample attack/release).
+    envfollow(ta, tr, x2) = loop ~ _
+    with {
+        // flushed below 1e-30 so that it does not linger in the subnormal range
+        loop(e) = en * (en > 1e-30)
+        with {
+            // arithmetic instead of ba.if: Faust 2.70 generates C++ that doesn't
+            // compile (undeclared fConst) for ba.if(x2 > e, ca, cr) here
+            en = e + (cr + (x2 > e) * (ca - cr)) * (x2 - e);
+        };
+        // -expm1(-x) = 1 - exp(-x) without its cancellation in single precision
+        // (x is down to 2e-5 for a 300 ms release at 192 kHz)
+        ca = 0.0 - ma.expm1(-1.0 / (max(1e-5, ta) * ma.SR));
+        cr = 0.0 - ma.expm1(-1.0 / (max(1e-4, tr) * ma.SR));
+    };
+
+    // One band: K = 0 (low), 1 (mid), 2 (high).
+    band(K, thr, bu, bd, bl, br) = gl * bl, gl * br
+    with {
+        trel = tr(K, min(100.0, tp)) * max(1.0, tp / 100.0);
+        env = envfollow(ta(K), trel, 0.5 * (bl * bl + br * br));
+        E = 10.0 * log10(max(env, 1e-20));
+        tsh = tshift(K, thr);
+        mks = mkshape(K, depth);
+        ups = max(0.0, depth) * max(0.0, upward) * (1.0 - bu);
+        dns = min(1.0, dnshape(K, depth) * fdstr(downward)) * (1.0 - bd);
+        gdb = mks * mk(K)
+            + min(cu(K), ups * su(K) * soft(wu(K), tu(K) + tsh - E))
+            - dns * soft(wd(K), E - td(K) - tsh);
+        gl = ba.db2linear(max(gmin(K), gdb));
+    };
+
+    // A -600 dB signal (DC plus a quarter of the sample rate) keeps the crossover
+    // states out of the subnormal range after the input stops.
+    ad = 1e-30 * (1.0 + (((+(1) : %(4)) ~ _) == 0) - (((+(1) : %(4)) ~ _) == 2));
+    bnd(K, x) = x * ia + ad : fi.crossover3LR4(F1, F2) : ba.selector(K, 3);
+    proc(K) = band(K, thrsel(K), busel(K), bdsel(K), bnd(K, xL), bnd(K, xR));
+    thrsel(0) = threshL; thrsel(1) = threshM; thrsel(2) = threshH;
+    busel(0) = bypUpL; busel(1) = bypUpM; busel(2) = bypUpH;
+    bdsel(0) = bypDnL; bdsel(1) = bypDnM; bdsel(2) = bypDnH;
+    gsel(0) = gainL; gsel(1) = gainM; gsel(2) = gainH;
+    outL = oa * sum(k, 3, ba.db2linear(gsel(k)) * (proc(k) : _, !));
+    outR = oa * sum(k, 3, ba.db2linear(gsel(k)) * (proc(k) : !, _));
+
+    // Fitted constants (crossovers, per-band thresholds, knees, makeup, caps,
+    // floors, attack/release and Depth/strength/threshold laws).
+    F1 = 88.3;
+    F2 = 2500.0;
+
+    tu(0) = -46.0171;
+    tu(1) = -46.5885;
+    tu(2) = -47.4393;
+    wu(0) = 0.0552;
+    wu(1) = 0.4509;
+    wu(2) = 0.0338;
+    su(0) = 0.74786;
+    su(1) = 0.75601;
+    su(2) = 0.74738;
+    td(0) = -38.9401;
+    td(1) = -34.8204;
+    td(2) = -41.6879;
+    wd(0) = 0.5;
+    wd(1) = 0.530023;
+    wd(2) = 0.5;
+    mk(0) = 14.0348;
+    mk(1) = 9.05203;
+    mk(2) = 14.064;
+    cu(0) = 35.901;
+    cu(1) = 36.285;
+    cu(2) = 35.872;
+    gmin(0) = -26.26;
+    gmin(1) = -31.70;
+    gmin(2) = -25.95;
+
+    ta(0) = 0.00621537;
+    ta(1) = 0.006;
+    ta(2) = 0.0096577;
+
+    // Envelope release tau (s) vs Time in percent, 0-100 % (held above).
+    tr(0, pct) = pct : ba.bpf.start(0, 0.0100376) : ba.bpf.point(50, 0.0148167) : ba.bpf.end(100, 0.030877);
+    tr(1, pct) = pct : ba.bpf.start(0, 0.0118089) : ba.bpf.point(50, 0.0174314) : ba.bpf.end(100, 0.030877);
+    tr(2, pct) = pct : ba.bpf.start(0, 0.00702632) : ba.bpf.point(50, 0.00702632) : ba.bpf.end(100, 0.0103717);
+
+
+    // Makeup and downward Depth shapes (cubics through origin, 1 at depth 1)
+    mkshape(0, d) = d * (1.83819 + d * (-1.21424 + d * 0.37606));
+    mkshape(1, d) = d * (1.63851 + d * (-0.83224 + d * 0.19373));
+    mkshape(2, d) = d * (1.84440 + d * (-1.22723 + d * 0.38284));
+    dnshape(0, d) = d * (0.96509 + d * (0.03154 + d * 0.00337));
+    dnshape(1, d) = d * (0.96161 + d * (0.02205 + d * 0.01634));
+    dnshape(2, d) = d * (0.97286 + d * (0.05778 + d * -0.03064));
+
+    // Downward strength law (0-2), piecewise linear, 1 at 1 (the upward strength
+    // scales the upward slope directly).
+    fdstr(p) = p : ba.bpf.start(0, 0)
+        : ba.bpf.point(0.2, 0.189716)
+        : ba.bpf.point(0.4, 0.389364)
+        : ba.bpf.point(0.6, 0.590038)
+        : ba.bpf.point(0.8, 0.793116)
+        : ba.bpf.point(1, 1)
+        : ba.bpf.end(2, 2);
+
+    // Threshold shift in dB (both knees move together), linear in thresh.
+    tshift(0, p) = (p - 1.0) * 23.009;
+    tshift(1, p) = (p - 1.0) * 23.743;
+    tshift(2, p) = (p - 1.0) * 24.021;
+};
